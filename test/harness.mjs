@@ -18,6 +18,12 @@
  *   taking effect is observing an own property shadowing a prototype method —
  *   the mechanism the plugin actually relies on.
  *
+ * The fourth thing that is not simulated is the **session**: each fixture agent
+ * holds a real `@deepseek-ai/dsh-session` `Session`, so the durable backstop's
+ * seam (an own property over the prototype `append`) and its consequence (what
+ * the log actually ends up carrying) are observed on the shipped class rather
+ * than on a stand-in.
+ *
  * What is *not* real is the loop itself: the fixture records the cause it was
  * handed instead of aborting a signal and running a turn. The consequence of the
  * cause — `assertNever` inside the turn's catch, and the `reason: null` row that
@@ -33,6 +39,7 @@
 
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import plugin, * as namespace from '../lib/index.js'
 
 /** Both export forms, for the arms that assert each of them mounts. */
@@ -84,7 +91,7 @@ export class FixtureAgent {
    */
   constructor(id) {
     this.id = id
-    this.session = { id }
+    this.session = Session.create(SessionId(id))
     this.status = 'running'
     /** Every call that reached the method, in order. */
     this.calls = []
@@ -106,7 +113,7 @@ export class FixtureAgent {
 export class SealedAgent {
   constructor(id) {
     this.id = id
-    this.session = { id }
+    this.session = Session.create(SessionId(id))
     this.status = 'running'
     this.calls = []
     // `cancel` deliberately NOT on the instance: the own property below is what
@@ -157,5 +164,7 @@ export async function world({ mounted = true, config = {}, form = 'default' } = 
     },
     /** The recorded calls of one fixture agent. */
     calls: agent => agent.calls,
+    /** The durable rows of one fixture agent's real session, in order. */
+    rows: agent => agent.session.snapshotEvents(),
   }
 }

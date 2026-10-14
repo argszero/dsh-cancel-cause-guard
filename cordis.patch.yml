@@ -15,24 +15,33 @@
 # surface message slots, `request/header` and `tool/result`, and `turn/end.reason` is
 # a TypeScript-only invariant. Every reader that dereferences it then throws, and the
 # chat client does exactly that while rendering, so one such row blanks the
-# conversation area. Reported three times: discussions #8832, #9156 and #9646.
+# conversation area. Reported four times: discussions #8832, #9156, #9646 and #9699.
 #
 # A harness older than `0.1.7` had no such function and recorded the same abuse as a
 # malformed-but-readable row, which is why this is a guard: the failure changed shape
 # under callers that had not changed at all.
 #
-# This plugin closes the seam that is left. It listens to `agent/created` — the
-# serial, awaited lifecycle edge that hands over the **live agent instance**
-# (`dsh-agent/src/index.ts:550`) — and shadows that instance's `cancel` with a wrapper
-# that carries anything outside the union as `{ kind: 'hook', reason: <the value's own
-# name> }` before the loop ever sees it. `hook` is the member the union reserves for
-# plugins, so the rewrite is not a lie: a plugin did cancel the turn, and the reason
-# names which one. One own-property write covers every instance-level caller, because
-# `ReactLoopAgent.cancel` is a prototype method.
+# This plugin closes the defect at two depths. **At the entry**, it listens to
+# `agent/created` — the serial, awaited lifecycle edge that hands over the **live agent
+# instance** (`dsh-agent/src/index.ts:550`) — and shadows that instance's `cancel` with
+# a wrapper that carries anything outside the union as `{ kind: 'hook', reason: <the
+# value's own name> }` before the loop ever sees it. `hook` is the member the union
+# reserves for plugins, so the rewrite is not a lie: a plugin did cancel the turn, and
+# the reason names which one. One own-property write covers every instance-level caller,
+# because `ReactLoopAgent.cancel` is a prototype method.
 #
-# It never refuses a cancellation, forwards an already-valid cause by reference, and
-# cannot repair rows already on disk (it reads no history). Mounting it bounds the
-# defect from that point on.
+# **At the write**, the same edge hands over the **live session**, and the plugin
+# shadows that session's `append` too — so a `turn/end` row whose reason no reader can
+# dereference is committed as `{ kind: 'aborted', reason: { kind: 'hook', reason: … } }`
+# instead. That arm covers the callers the entry guard cannot reach: one that goes
+# through the class rather than the instance
+# (`ReactLoopAgent.prototype.cancel.call(agent, …)`, or a second copy of the loop in the
+# process), and an instance that refuses the own `cancel` property.
+#
+# It never refuses a cancellation, forwards an already-valid cause by reference, leaves
+# any reason a reader can dereference untouched (a plugin's own `TurnEndReasonMap`
+# variant included), and cannot repair rows already on disk (it reads no history).
+# Mounting it bounds the defect from that point on.
 #
 # Optional config:
 #
@@ -50,6 +59,10 @@
 #           # reason: plugin-bug
 #           # Bound on the minted reason, in characters. Defaults to 200.
 #           maxReasonChars: 200
+#           # Whether the durable backstop is installed as well (default true).
+#           # `false` leaves the session's own `append` untouched, so only the entry
+#           # guard is in force — set it if another plugin already owns that method.
+#           backstop: true
 #
 # An unknown key is refused rather than ignored: a misspelled `mode` that mounts and
 # guards nothing is how an operator believes a guard is in force when it is not.

@@ -199,22 +199,109 @@ const MUTATIONS = [
   {
     name: 'the fiber\'s unwind forgets to restore, so unmounting leaves a shadow on every live agent',
     file: 'src/index.ts',
-    edits: [['    for (const handle of guards.values()) handle.restore()', '    for (const handle of guards.values()) void handle.outcome']],
+    edits: [['    for (const shadows of guards.values()) restoreShadows(shadows)', '    for (const shadows of guards.values()) void shadows.cancel']],
   },
   {
     name: 'a guarded agent is not tracked, so its disposal leaves the shadow in place forever',
     file: 'src/index.ts',
-    edits: [['      case \'patched\':\n        guards.set(agent, handle)', "      case 'patched':\n        void handle"]],
+    edits: [['      case \'patched\':\n        shadows.cancel = handle', "      case 'patched':\n        void handle"]],
   },
   {
     name: 'the agent\'s disposal does not restore, so the guard outlives the agent it shadowed',
     file: 'src/index.ts',
-    edits: [['    handle.restore()\n    guards.delete(agent)', '    void handle\n    guards.delete(agent)']],
+    edits: [['    restoreShadows(shadows)\n    guards.delete(agent)', '    void shadows\n    guards.delete(agent)']],
   },
   {
     name: 'the two modes are reported the other way round, so the log claims a repair that did not happen',
     file: 'src/index.ts',
     edits: [["  const outcome = mode === 'observe'", "  const outcome = mode === 'normalize'"]],
+  },
+  {
+    name: 'the durable backstop is installed only when it is switched off, so a default mount leaves the null row reachable',
+    file: 'src/index.ts',
+    edits: [['    if (settings.backstop) {', '    if (!settings.backstop) {']],
+  },
+  {
+    name: 'a backstopped session is not tracked, so its disposal leaves the append shadow in place forever',
+    file: 'src/index.ts',
+    edits: [['        case \'patched\':\n          shadows.append = backstop', "        case 'patched':\n          void backstop"]],
+  },
+  {
+    name: 'the unwind forgets the append shadow, so unmounting leaves every session wrapped',
+    file: 'src/index.ts',
+    edits: [['  shadows.cancel?.restore()\n  shadows.append?.restore()', '  shadows.cancel?.restore()']],
+  },
+  // ------------------------------------------------------------ backstop.ts
+  {
+    name: 'the event filter is inverted, so every event but turn/end is inspected and rewritten',
+    file: 'src/backstop.ts',
+    edits: [['  if (args[0] !== TURN_END) return undefined', '  if (args[0] === TURN_END) return undefined']],
+  },
+  {
+    name: 'a reason a reader can dereference is rewritten anyway, so a working turn ending is replaced',
+    file: 'src/backstop.ts',
+    edits: [['  if (isReadableTurnEndReason(reason)) return undefined', '  if (isReadableTurnEndReason(reason) && args.length > 99) return undefined']],
+  },
+  {
+    name: 'the kind test is loosened, so an empty kind passes as a reason a reader can read',
+    file: 'src/backstop.ts',
+    edits: [['  return typeof kind === \'string\' && kind.trim().length > 0', '  return kind !== undefined']],
+  },
+  {
+    name: 'the replacement row names the caller rather than the plugin, so the log blames a member that cannot be it',
+    file: 'src/backstop.ts',
+    edits: [['    reason: { kind: \'aborted\', reason: { kind: \'hook\', reason: unseenCauseReason(options) } },', "    reason: { kind: 'aborted', reason: { kind: 'parent' } },"]],
+  },
+  {
+    name: 'observe mode repairs as well, so the operator who asked for a report gets the row rewritten instead',
+    file: 'src/backstop.ts',
+    edits: [["    if (options.mode === 'observe') return Reflect.apply(original, session, args)", "    if (options.mode === 'normalize') return Reflect.apply(original, session, args)"]],
+  },
+  {
+    name: 'the install is confirmed by the wrong comparison, so every successful write is reported as refused',
+    file: 'src/backstop.ts',
+    edits: [['  if ((session as { append?: unknown }).append !== wrapper) {', '  if ((session as { append?: unknown }).append === wrapper) {']],
+  },
+  {
+    name: 'the undo unwinds a shadow that is no longer ours, so a later guard\'s wrapper is deleted by this one',
+    file: 'src/backstop.ts',
+    edits: [['      if ((session as { append?: unknown }).append !== wrapper) return', '      if ((session as { append?: unknown }).append === wrapper) return']],
+  },
+  {
+    name: 'the installed wrapper is left unmarked, so a second copy of this plugin backstops a session twice',
+    file: 'src/backstop.ts',
+    edits: [['  wrapper[APPEND_GUARD_MARK] = true', '  void APPEND_GUARD_MARK']],
+  },
+  {
+    name: 'the payload is rebuilt from the reason alone, so the rest of the row the loop wrote is dropped',
+    file: 'src/backstop.ts',
+    edits: [['    forwarded[1] = { ...(args[1] as Record<string, unknown>), reason: decided.reason }', '    forwarded[1] = { reason: decided.reason }']],
+  },
+  {
+    name: 'the configured reason is ignored, so an operator who named the defect reads the default text instead',
+    file: 'src/backstop.ts',
+    edits: [['  const text = options.reason ?? UNSEEN_CAUSE_REASON', '  const text = UNSEEN_CAUSE_REASON']],
+  },
+  {
+    name: 'the reason minted for a repaired row is unbounded, so a configured bound does not hold on this path',
+    file: 'src/backstop.ts',
+    edits: [['  return truncate(text, options.maxReasonChars)', '  return text']],
+  },
+  {
+    name: 'a reason that was absent is described as one that was null, so the log misnames what arrived',
+    file: 'src/backstop.ts',
+    edits: [["  if (reason === undefined) return 'absent'", "  if (reason === undefined) return 'null'"]],
+  },
+  // ------------------------------------------------------------- config.ts
+  {
+    name: 'the durable backstop defaults to off, so a default mount leaves the append path unguarded',
+    file: 'src/config.ts',
+    edits: [['  backstop: true,', '  backstop: false,']],
+  },
+  {
+    name: 'the backstop switch is refused the wrong way round, so booleans are refused and typo strings are taken',
+    file: 'src/config.ts',
+    edits: [["  if (typeof backstop !== 'boolean') {", "  if (typeof backstop === 'boolean') {"]],
   },
 ]
 

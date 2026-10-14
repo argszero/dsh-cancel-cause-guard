@@ -33,9 +33,12 @@
  *
  * ## What this plugin does
  *
- * It listens to `agent/created` — the serial, awaited lifecycle edge that hands
- * over the **live agent instance** — and shadows that instance's `cancel` with a
- * wrapper that normalizes anything outside the union into
+ * It closes the defect at two depths, and the second one exists for the callers
+ * the first cannot see.
+ *
+ * **At the entry.** It listens to `agent/created` — the serial, awaited lifecycle
+ * edge that hands over the **live agent instance** — and shadows that instance's
+ * `cancel` with a wrapper that normalizes anything outside the union into
  * `{ kind: 'hook', reason: <the value's own name> }` before the loop ever sees
  * it. `hook` is the union member the harness reserves for plugins, so the
  * rewrite is not a lie: a plugin did cancel the turn, and the reason names which
@@ -44,21 +47,31 @@
  * third-party plugin — because `ReactLoopAgent.cancel` is a prototype method and
  * the shadow is an own property.
  *
- * Every rewrite is logged, with the offending value rendered as JSON, so the
- * producer can be found and fixed rather than merely tolerated.
+ * **At the write.** The same edge hands over the **live session**, and the
+ * plugin shadows that session's own `append` too, so a `turn/end` row whose
+ * reason no reader can dereference is committed instead as the row the loop meant
+ * to write: `{ kind: 'aborted', reason: { kind: 'hook', reason: <text> } }`. That
+ * arm is what covers the callers the entry guard cannot reach — one that goes
+ * through the class rather than the instance
+ * (`ReactLoopAgent.prototype.cancel.call(agent, …)`, or a second copy of the loop
+ * in the process), and an instance that refuses the own `cancel` property, where
+ * the entry guard simply reports that it is not in force. Set `backstop: false`
+ * to leave the append path exactly as the harness's.
+ *
+ * Every rewrite and every repaired row is logged, with the offending value
+ * rendered as JSON, so the producer can be found and fixed rather than merely
+ * tolerated.
  *
  * ## What it does not do
  *
- * It does not refuse a cancellation, does not touch the options, does not
- * rewrite a cause that is already a member (that one is forwarded by reference),
- * and cannot repair a session that already carries a `null` row — those rows are
- * on disk, and this plugin reads no history. Mounting it bounds the defect from
- * that point on.
+ * It does not refuse a cancellation, does not touch the options, does not rewrite
+ * a cause that is already a member (that one is forwarded by reference), and
+ * cannot repair a session that already carries a `null` row — those rows are on
+ * disk, and this plugin reads no history. Mounting it bounds the defect from that
+ * point on.
  *
- * It also cannot cover the one caller that reaches the class rather than the
- * instance, which is why `mode: 'observe'` exists: an operator who wants to see
- * the failure happen may mount this plugin as a reporter and still get the
- * producer named in the log.
+ * `mode: 'observe'` exists for the operator who wants to see the failure happen:
+ * both arms report and neither rewrites, and the log names what arrived.
  *
  * @module @argszero/dsh-cancel-cause-guard
  */
@@ -66,20 +79,26 @@
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only: the `agent/created` and `agent/disposed` Context merges this plugin listens on.
 import type {} from '@deepseek-ai/dsh-agent'
+import { guardSessionAppend } from './backstop.ts'
 import { resolveConfig } from './config.ts'
 import { guardCancel } from './guard.ts'
-import type { Config, GuardHandle, GuardMode, NormalizedCause } from './types.ts'
+import type { BackstopHandle, BackstopOptions, Config, GuardHandle, GuardMode, NormalizedCause, RepairedTurnEnd } from './types.ts'
 
 export { DEFAULT_MAX_REASON_CHARS, describeValue, isCancelCause, normalizeCancelCause, reasonText, UNSPECIFIED_REASON } from './cause.ts'
+export { APPEND_GUARD_MARK, UNSEEN_CAUSE_REASON, guardSessionAppend, isReadableTurnEndReason, unseenCauseReason } from './backstop.ts'
 export { DEFAULTS, resolveConfig } from './config.ts'
 export { GUARD_MARK, guardCancel } from './guard.ts'
 export type { GuardOptions } from './guard.ts'
 export type {
+  BackstopHandle,
+  BackstopOptions,
+  BackstopOutcome,
   Config,
   GuardHandle,
   GuardMode,
   GuardOutcome,
   NormalizedCause,
+  RepairedTurnEnd,
   ResolvedConfig,
 } from './types.ts'
 
@@ -112,59 +131,158 @@ const LOG_PREFIX = 'cancel-cause-guard:'
  */
 export function apply(ctx: Context, config: Config = {}): void {
   const settings = resolveConfig(config)
-  /** The guards this plugin installed and has not yet unwound, by agent instance. */
-  const guards = new Map<object, GuardHandle>()
+  /** The shadows this plugin installed and has not yet unwound, by agent instance. */
+  const guards = new Map<object, AgentShadows>()
 
   // Registered before the listeners so that it is unwound *after* them: the
   // fiber's effects are disposed in reverse, and unwinding a shadow while a
   // listener could still install another would leave the last one behind.
   ctx.effect(() => () => {
-    for (const handle of guards.values()) handle.restore()
+    for (const shadows of guards.values()) restoreShadows(shadows)
     guards.clear()
   }, `${LOG_PREFIX}restore()`)
 
   ctx.on('agent/created', ({ agent }): undefined => {
+    const shadows: AgentShadows = {}
+    const sessionId = agent.session.id
     const handle = guardCancel(agent, {
       mode: settings.mode,
       reason: settings.reason,
       maxReasonChars: settings.maxReasonChars,
-      onNormalized: report => { reportNormalized(ctx, agent.session.id, report, settings.mode) },
+      onNormalized: report => { reportNormalized(ctx, sessionId, report, settings.mode) },
     })
     switch (handle.outcome) {
       case 'patched':
-        guards.set(agent, handle)
+        shadows.cancel = handle
         ctx.logger.debug(
-          `${LOG_PREFIX} agent ${agent.session.id}: cancellation causes outside the union will be `
+          `${LOG_PREFIX} agent ${sessionId}: cancellation causes outside the union will be `
           + 'recorded as { kind: "hook", reason } instead of ending the turn with reason null',
         )
-        return
+        break
       case 'already-guarded':
         ctx.logger.debug(
-          `${LOG_PREFIX} agent ${agent.session.id}: already guarded by this plugin, leaving the `
+          `${LOG_PREFIX} agent ${sessionId}: already guarded by this plugin, leaving the `
           + 'existing wrapper in place',
         )
-        return
+        break
       case 'no-cancel':
         ctx.logger.warn(
-          `${LOG_PREFIX} agent ${agent.session.id} carries no cancel method, so an out-of-union `
+          `${LOG_PREFIX} agent ${sessionId} carries no cancel method, so an out-of-union `
           + 'cause from any plugin it hands itself to will still end its turn with reason null',
         )
-        return
+        break
       /* v8 ignore next 4 -- the read-back check makes both write failures one outcome. */
       case 'not-writable':
         ctx.logger.warn(
-          `${LOG_PREFIX} agent ${agent.session.id} refuses an own "cancel" property, so this guard `
+          `${LOG_PREFIX} agent ${sessionId} refuses an own "cancel" property, so this guard `
           + 'is NOT in force for it: an out-of-union cause will end its turn with reason null',
         )
     }
+
+    // The durable half, installed after the entry guard so that the ordering is
+    // legible: what the entry guard rewrites never reaches this one, and what
+    // reaches this one is exactly the cancellation the entry guard could not see.
+    if (settings.backstop) {
+      const backstop = guardSessionAppend(agent.session, backstopOptions(ctx, sessionId, settings))
+      switch (backstop.outcome) {
+        case 'patched':
+          shadows.append = backstop
+          ctx.logger.debug(
+            `${LOG_PREFIX} agent ${sessionId}: a turn/end row that reached the log with no `
+            + 'readable reason will be recorded as { kind: "aborted", reason: { kind: "hook", reason } }',
+          )
+          break
+        case 'already-guarded':
+          ctx.logger.debug(
+            `${LOG_PREFIX} agent ${sessionId}: the session is already backstopped by this plugin, `
+            + 'leaving the existing wrapper in place',
+          )
+          break
+        case 'no-append':
+          ctx.logger.warn(
+            `${LOG_PREFIX} agent ${sessionId}: its session carries no append method, so the `
+            + 'durable backstop is NOT in force for it',
+          )
+          break
+        /* v8 ignore next 4 -- the read-back check makes both write failures one outcome. */
+        case 'not-writable':
+          ctx.logger.warn(
+            `${LOG_PREFIX} agent ${sessionId}: its session refuses an own "append" property, so `
+            + 'the durable backstop is NOT in force for it',
+          )
+      }
+    }
+
+    if (shadows.cancel !== undefined || shadows.append !== undefined) guards.set(agent, shadows)
   })
 
   ctx.on('agent/disposed', ({ agent }) => {
-    const handle = guards.get(agent)
-    if (handle === undefined) return
-    handle.restore()
+    const shadows = guards.get(agent)
+    if (shadows === undefined) return
+    restoreShadows(shadows)
     guards.delete(agent)
   })
+}
+
+/** The shadows one agent carries: its `cancel`, its session's `append`, or both. */
+interface AgentShadows {
+  cancel?: GuardHandle | undefined
+  append?: BackstopHandle | undefined
+}
+
+/**
+ * Unwind every shadow of one agent.
+ * @param shadows - the handles this plugin installed for that agent.
+ */
+function restoreShadows(shadows: AgentShadows): void {
+  shadows.cancel?.restore()
+  shadows.append?.restore()
+}
+
+/**
+ * The backstop options for one agent.
+ * @param ctx - the plugin context, for logging.
+ * @param sessionId - the session the backstop reports against.
+ * @param settings - the resolved configuration.
+ * @returns the options, with the report callback bound.
+ */
+function backstopOptions(
+  ctx: Context,
+  sessionId: string,
+  settings: { mode: GuardMode; reason: string | undefined; maxReasonChars: number },
+): BackstopOptions {
+  return {
+    mode: settings.mode,
+    reason: settings.reason,
+    maxReasonChars: settings.maxReasonChars,
+    onRepaired: report => { reportRepaired(ctx, sessionId, report, settings.mode) },
+  }
+}
+
+/**
+ * Record one unreadable `turn/end` reason.
+ *
+ * A warning rather than an error, and deliberately a different sentence from
+ * {@link reportNormalized}: this row was not a cause the entry guard rewrote but
+ * a cancellation the entry guard never saw, and the operator has to be able to
+ * tell the two apart when working out who produced it.
+ * @param ctx - the plugin context, for logging.
+ * @param sessionId - the session whose row it was.
+ * @param report - what the row carried, and what it became.
+ * @param mode - whether the row was repaired or passed through.
+ */
+function reportRepaired(ctx: Context, sessionId: string, report: RepairedTurnEnd, mode: GuardMode): void {
+  const outcome = mode === 'observe'
+    ? 'it was committed unchanged (mode "observe"), so this session is now unreadable in the chat view'
+    : 'it was recorded as '
+      + `{ "kind": "aborted", "reason": { "kind": "hook", "reason": ${JSON.stringify(report.normalized.reason)} } }`
+  ctx.logger.warn(
+    `${LOG_PREFIX} session ${sessionId}: a turn/end row for turn ${String(report.turn)} reached the `
+    + `log with a reason no reader can dereference (${report.described}); ${outcome}. `
+    + 'The cancellation never passed the entry guard, so its cause is not in this record: a caller '
+    + 'reached the cancel method through the class rather than through the instance, a second copy '
+    + 'of the loop aborted a signal of its own, or the instance refused the guard.',
+  )
 }
 
 /**

@@ -1,5 +1,5 @@
 /**
- * Configuration resolution: the defaults, and the four ways a configuration is
+ * Configuration resolution: the defaults, and the ways a configuration is
  * refused.
  *
  * A guard whose knobs are silently ignored is a guard an operator believes is in
@@ -14,11 +14,12 @@ import { describe, it } from 'node:test'
 import { DEFAULTS, DEFAULT_MAX_REASON_CHARS, resolveConfig } from '../lib/index.js'
 
 describe('the defaults', () => {
-  it('normalizes, names the cause after itself, and bounds the reason at 200', () => {
+  it('normalizes, backstops, names the cause after itself, and bounds the reason at 200', () => {
     assert.deepEqual(resolveConfig(), {
       mode: 'normalize',
       reason: undefined,
       maxReasonChars: DEFAULT_MAX_REASON_CHARS,
+      backstop: true,
     })
     assert.deepEqual(resolveConfig({}), resolveConfig())
   })
@@ -39,6 +40,7 @@ describe('the defaults', () => {
   it('exposes its defaults as a frozen constant', () => {
     assert.equal(Object.isFrozen(DEFAULTS), true)
     assert.equal(DEFAULTS.mode, 'normalize')
+    assert.equal(DEFAULTS.backstop, true)
   })
 })
 
@@ -69,6 +71,20 @@ describe('the refusals', () => {
     }
   })
 
+  it('refuses a backstop switch that is not a boolean', () => {
+    // `'false'` is the mistake YAML quoting produces, and it is the dangerous
+    // direction: the operator believes the append path was left alone.
+    for (const bad of ['false', 0, 1, {}]) {
+      assert.throws(() => resolveConfig({ backstop: bad }), /backstop must be true or false/u, String(bad))
+    }
+  })
+
+  it('treats an absent or empty backstop as the default, like every other field', () => {
+    // `??` is the rule for all four keys, so a YAML `backstop:` with no value
+    // resolves to the default — which here is the safe direction.
+    assert.equal(resolveConfig({ backstop: null }).backstop, true)
+  })
+
   it('refuses a configuration that is not an object', () => {
     for (const bad of [null, [], 'observe']) {
       assert.throws(() => resolveConfig(bad), /must be an object/u, String(bad))
@@ -87,10 +103,17 @@ describe('the accepted values', () => {
     assert.equal(resolved.maxReasonChars, 12)
   })
 
+  it('takes backstop: false, which is how an operator leaves the append path alone', () => {
+    assert.equal(resolveConfig({ backstop: false }).backstop, false)
+  })
+
   it('accepts an explicit undefined for either optional field', () => {
     // `exactOptionalPropertyTypes` in the source means an explicitly-passed
     // `undefined` is a distinct case from an absent key; both must resolve to the
     // default rather than to a broken value.
-    assert.deepEqual(resolveConfig({ mode: undefined, reason: undefined, maxReasonChars: undefined }), resolveConfig())
+    assert.deepEqual(
+      resolveConfig({ mode: undefined, reason: undefined, maxReasonChars: undefined, backstop: undefined }),
+      resolveConfig(),
+    )
   })
 })

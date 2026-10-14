@@ -1,9 +1,10 @@
 /**
  * Configuration resolution for the cancellation-cause guard.
  *
- * The surface is deliberately three fields. A guard that rewrites a value on a
- * path as hot as cancellation has to be readable in one sitting, and every knob
- * it does not have is a way for an operator to be surprised by what it did.
+ * The surface is deliberately four fields. A guard that rewrites a value on
+ * paths as hot as cancellation and the session append has to be readable in one
+ * sitting, and every knob it does not have is a way for an operator to be
+ * surprised by what it did.
  *
  * An unknown key is refused rather than ignored: a misspelled `mode` that mounts
  * and guards nothing is how an operator believes a guard is in force when it is
@@ -20,9 +21,10 @@ export const DEFAULTS: ResolvedConfig = Object.freeze({
   mode: 'normalize',
   reason: undefined,
   maxReasonChars: DEFAULT_MAX_REASON_CHARS,
+  backstop: true,
 })
 
-const CONFIG_KEYS: ReadonlySet<string> = new Set(['mode', 'reason', 'maxReasonChars'])
+const CONFIG_KEYS: ReadonlySet<string> = new Set(['mode', 'reason', 'maxReasonChars', 'backstop'])
 
 const MODES: ReadonlySet<string> = new Set<GuardMode>(['normalize', 'observe'])
 
@@ -41,7 +43,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     if (!CONFIG_KEYS.has(key)) {
       throw new Error(
         `cancel-cause-guard config: unknown key "${key}" `
-        + '(allowed: mode, reason, maxReasonChars)',
+        + '(allowed: mode, reason, maxReasonChars, backstop)',
       )
     }
   }
@@ -69,5 +71,10 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     )
   }
 
-  return Object.freeze({ mode, reason, maxReasonChars })
+  const backstop = config.backstop ?? DEFAULTS.backstop
+  if (typeof backstop !== 'boolean') {
+    throw new Error('cancel-cause-guard config: backstop must be true or false')
+  }
+
+  return Object.freeze({ mode, reason, maxReasonChars, backstop })
 }

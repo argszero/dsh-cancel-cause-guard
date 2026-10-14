@@ -15,8 +15,8 @@
 
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { GUARD_MARK } from '../lib/index.js'
-import { FixtureAgent, LOG_PREFIX, PLUGIN_NAME, namespace, plugin as defaultExport, world } from './harness.mjs'
+import { APPEND_GUARD_MARK, GUARD_MARK, UNSEEN_CAUSE_REASON } from '../lib/index.js'
+import { FixtureAgent, LOG_PREFIX, PLUGIN_NAME, SealedAgent, namespace, plugin as defaultExport, world } from './harness.mjs'
 
 /** The value three discussions report: a bare string in place of a union member. */
 const BAD = 'thinking-loop'
@@ -203,5 +203,130 @@ describe('unmounting leaves nothing behind', () => {
     const agent = await w.announce(new FixtureAgent('untouched'))
     w.detach(agent)
     assert.equal(Object.prototype.hasOwnProperty.call(agent, 'cancel'), false)
+  })
+})
+
+describe('the durable backstop, on a real Session', () => {
+  /**
+   * The row the defect leaves, written with the session's own `append`.
+   *
+   * Nothing here stands in for the harness: `agent.session` is a real
+   * `@deepseek-ai/dsh-session` `Session`, so what these arms read back is what
+   * `validateSessionEventData` accepted and what the log now carries.
+   */
+  const nullRow = { turn: 1, reason: null }
+
+  it('keeps the null row out of the log when the plugin is mounted', async () => {
+    const w = await world()
+    const agent = await w.announce(new FixtureAgent('backstopped'))
+    assert.equal(agent.session.append[APPEND_GUARD_MARK], true)
+
+    agent.session.append('turn/end', nullRow)
+
+    const [row] = w.rows(agent)
+    assert.deepEqual(row.data.reason, { kind: 'aborted', reason: { kind: 'hook', reason: UNSEEN_CAUSE_REASON } })
+  })
+
+  it('writes exactly that null row when nothing is mounted', async () => {
+    // The control arm, and the defect reproduced in-process against the shipped
+    // class: the write path accepts `reason: null` — the append-time validator
+    // inspects surface slots, `request/header` and `tool/result` instead — so the
+    // row is durable before any reader can object.
+    const w = await world({ mounted: false })
+    const agent = await w.announce(new FixtureAgent('unbackstopped'))
+    agent.session.append('turn/end', nullRow)
+    assert.deepEqual(w.rows(agent), [
+      { type: 'turn/end', seq: 0, time: w.rows(agent)[0].time, data: { turn: 1, reason: null } },
+    ])
+  })
+
+  it('covers an agent that refused the own cancel property', async () => {
+    // The entry guard's honest limit, closed for the durable half: the instance
+    // would not take the shadow, so its cancellation still ends with a null
+    // cause, and the row the loop writes for it is still readable.
+    const w = await world()
+    const agent = await w.announce(new SealedAgent('sealed-append'))
+    assert.equal(agent.cancel[GUARD_MARK], undefined)
+
+    agent.session.append('turn/end', { turn: 2, reason: null })
+
+    assert.deepEqual(w.rows(agent)[0].data.reason.kind, 'aborted')
+    assert.ok(w.logs.matching(`${LOG_PREFIX} agent sealed-append refuses an own "cancel"`).length === 1)
+  })
+
+  it('leaves the append path alone when the backstop is switched off', async () => {
+    const w = await world({ config: { backstop: false } })
+    const agent = await w.announce(new FixtureAgent('no-backstop'))
+    // The entry guard is still in force; only the durable half is off.
+    assert.equal(agent.cancel[GUARD_MARK], true)
+    assert.equal(Object.prototype.hasOwnProperty.call(agent.session, 'append'), false)
+
+    agent.session.append('turn/end', nullRow)
+    assert.equal(w.rows(agent)[0].data.reason, null)
+  })
+
+  it('reports the row it repaired, and names it apart from an entry-guard rewrite', async () => {
+    const w = await world()
+    const agent = await w.announce(new FixtureAgent('reported'))
+    agent.session.append('turn/end', { turn: 7, reason: null })
+
+    const [warning] = w.logs.matching(`${LOG_PREFIX} session reported:`)
+    const text = String(warning.args[0])
+    assert.ok(text.includes('turn 7'), text)
+    assert.ok(text.includes('never passed the entry guard'), text)
+    // And the entry guard's own sentence is a different one, so an operator can
+    // tell a rewritten cause from a row the entry guard never saw.
+    assert.equal(text.includes('a caller passed'), false)
+  })
+
+  it('says nothing when the cause went through the entry guard', async () => {
+    const w = await world()
+    const agent = await w.announce(new FixtureAgent('quiet-append'))
+    agent.cancel(BAD)
+    assert.equal(agent.calls[0].cause.kind, 'hook')
+    assert.deepEqual(w.logs.matching(`${LOG_PREFIX} session quiet-append: a turn/end row`), [])
+  })
+
+  it('reports the row and commits it unchanged in observe mode', async () => {
+    const w = await world({ config: { mode: 'observe' } })
+    const agent = await w.announce(new FixtureAgent('observed-append'))
+    agent.session.append('turn/end', nullRow)
+
+    assert.equal(w.rows(agent)[0].data.reason, null)
+    const [warning] = w.logs.matching(`${LOG_PREFIX} session observed-append:`)
+    assert.ok(String(warning.args[0]).includes('committed unchanged'), String(warning.args[0]))
+  })
+
+  it('does not stack a second wrapper, and restores on both disposal paths', async () => {
+    const w = await world({ mounted: false })
+    const fork = await w.ctx.plugin(defaultExport, {})
+    const agent = await w.announce(new FixtureAgent('append-unmount'))
+    assert.equal(agent.session.append[APPEND_GUARD_MARK], true)
+
+    await fork.dispose()
+    assert.equal(Object.prototype.hasOwnProperty.call(agent.session, 'append'), false)
+    agent.session.append('turn/end', nullRow)
+    assert.equal(w.rows(agent)[0].data.reason, null)
+
+    const second = await world({ mounted: false })
+    const other = await second.ctx.plugin(defaultExport, {})
+    const agent2 = await second.announce(new FixtureAgent('append-disposed'))
+    assert.equal(agent2.session.append[APPEND_GUARD_MARK], true)
+    second.detach(agent2)
+    assert.equal(Object.prototype.hasOwnProperty.call(agent2.session, 'append'), false)
+    await other.dispose()
+  })
+
+  it('recognises a second mount and reports the row once', async () => {
+    const w = await world()
+    const fork = await w.ctx.plugin(defaultExport, {})
+    try {
+      const agent = await w.announce(new FixtureAgent('append-twice'))
+      agent.session.append('turn/end', nullRow)
+      assert.equal(w.rows(agent).length, 1)
+      assert.equal(w.logs.matching(`${LOG_PREFIX} session append-twice:`).length, 1)
+    } finally {
+      await fork.dispose()
+    }
   })
 })

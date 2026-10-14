@@ -203,7 +203,13 @@ function plainText(value: unknown): string {
   }
 }
 
-/** Bound one reason so a hostile value cannot write a wall of text into the log. */
-function truncate(text: string, maxChars: number): string {
+/**
+ * Bound one reason so a hostile value cannot write a wall of text into the log.
+ * Shared with the durable backstop, which mints a reason of its own.
+ * @param text - the reason text.
+ * @param maxChars - the bound, in characters.
+ * @returns the text, cut to the bound with a trailing ellipsis when it had to be.
+ */
+export function truncate(text: string, maxChars: number): string {
   return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1)}…`
 }
