@@ -1,0 +1,59 @@
+# The @argszero/dsh-cancel-cause-guard bundle patch: mount and go.
+#
+# One `turn/end` row can make a whole conversation view unreadable. When a caller
+# cancels a turn with a value outside the closed AgentCancelCause union — a bare
+# string such as `agent.cancel('thinking-loop')`, or an object whose `kind` the
+# union does not have — ReactLoopAgent.cancel hands it to `AbortController.abort()`,
+# so it becomes `signal.reason`. The turn's `catch` reads it back through
+# `abortedCancelCause`, whose switch ends in `assertNever` **inside the catch body**:
+# the assignment never runs, `turnEnds` stays at its `null` initializer, and the
+# unconditional `finally` appends `turn/end` with that `null`
+# (`dsh-agent-loop/src/agent.ts:385`, and the non-null assertion on the line is what
+# makes it compile).
+#
+# Nothing on the write path refuses the row — the append-time validator inspects
+# surface message slots, `request/header` and `tool/result`, and `turn/end.reason` is
+# a TypeScript-only invariant. Every reader that dereferences it then throws, and the
+# chat client does exactly that while rendering, so one such row blanks the
+# conversation area. Reported three times: discussions #8832, #9156 and #9646.
+#
+# A harness older than `0.1.7` had no such function and recorded the same abuse as a
+# malformed-but-readable row, which is why this is a guard: the failure changed shape
+# under callers that had not changed at all.
+#
+# This plugin closes the seam that is left. It listens to `agent/created` — the
+# serial, awaited lifecycle edge that hands over the **live agent instance**
+# (`dsh-agent/src/index.ts:550`) — and shadows that instance's `cancel` with a wrapper
+# that carries anything outside the union as `{ kind: 'hook', reason: <the value's own
+# name> }` before the loop ever sees it. `hook` is the member the union reserves for
+# plugins, so the rewrite is not a lie: a plugin did cancel the turn, and the reason
+# names which one. One own-property write covers every instance-level caller, because
+# `ReactLoopAgent.cancel` is a prototype method.
+#
+# It never refuses a cancellation, forwards an already-valid cause by reference, and
+# cannot repair rows already on disk (it reads no history). Mounting it bounds the
+# defect from that point on.
+#
+# Optional config:
+#
+#   - set:
+#       - id: cancel-cause-guard
+#         config:
+#           # 'normalize' (default) rewrites an out-of-union cause to
+#           # { kind: 'hook', reason }. 'observe' passes the caller's value through
+#           # untouched — the turn fails exactly as it would have — and only records
+#           # the producer in the log.
+#           mode: normalize
+#           # Reason text to record in place of the offending value's own name.
+#           # Absent (the default) names the cause after the value that produced it,
+#           # which is the only handle on whoever produced it.
+#           # reason: plugin-bug
+#           # Bound on the minted reason, in characters. Defaults to 200.
+#           maxReasonChars: 200
+#
+# An unknown key is refused rather than ignored: a misspelled `mode` that mounts and
+# guards nothing is how an operator believes a guard is in force when it is not.
+
+- insert:
+    - id: cancel-cause-guard
+      name: '@argszero/dsh-cancel-cause-guard'

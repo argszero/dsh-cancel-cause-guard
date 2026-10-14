@@ -1,0 +1,74 @@
+{
+  "name": "@argszero/dsh-cancel-cause-guard",
+  "description": "A plugin that cancels an agent's turn with a cause outside the closed AgentCancelCause union — a bare string like agent.cancel('thinking-loop'), or an object whose kind the union does not have — does not merely log something odd: it makes the whole conversation view unreadable. ReactLoopAgent.cancel hands the value to AbortController.abort(), so it becomes signal.reason; the turn's catch reads it back through abortedCancelCause, whose switch ends in assertNever *inside the catch body*, so turnEnds stays at its null initializer and the unconditional finally appends turn/end with that null (agent-loop/src/agent.ts:385, and the non-null assertion on the line is what makes it compile). Nothing on the write path refuses it — the append-time validator inspects surface slots, request/header and tool/result, and turn/end.reason is a TypeScript-only invariant. Every reader that dereferences it then throws, and the chat view does exactly that while rendering (ui-chat/src/client/contract/turn-process.ts:72), so one such row blanks the conversation area for every session. Reported three times (#8832, #9156, #9646). This plugin closes the seam that is left: it listens to agent/created — the serial, awaited lifecycle edge that hands over the live agent instance (packages/core/agent/src/index.ts:550) — and shadows that instance's cancel with a wrapper that carries anything outside the union as { kind: 'hook', reason } before the loop ever sees it. hook is the member the union reserves for plugins, so the rewrite is not a lie: a plugin did cancel the turn, and the reason names which one. One property write covers every instance-level caller, because ReactLoopAgent.cancel is a prototype method and the shadow is an own property. Every rewrite is logged with the offending value rendered as JSON, so the producer can be found and fixed rather than tolerated. It never refuses a cancellation, forwards an already-valid cause by reference, and cannot repair rows already on disk. Zero runtime dependencies beyond the harness packages it declares.",
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/types/**/*.d.ts",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/argszero/dsh-cancel-cause-guard.git"
+  },
+  "homepage": "https://github.com/argszero/dsh-cancel-cause-guard#readme",
+  "bugs": {
+    "url": "https://github.com/argszero/dsh-cancel-cause-guard/issues"
+  },
+  "keywords": [
+    "cordis",
+    "deepseek-harness",
+    "dsh",
+    "plugin",
+    "agent-cancel",
+    "cancel-cause",
+    "turn-end",
+    "session-integrity",
+    "agent-lifecycle",
+    "guard"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2 || ~4.0.5-alpha.1",
+    "@deepseek-ai/dsh-agent": ">=0.1.7-rc.2 <0.2.0 || >=0.2.0-rc.1 <0.2.1-alpha.2 || >=0.2.1-alpha.2 <0.3.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5-alpha.1",
+    "@deepseek-ai/dsh-agent": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-session": "0.2.1-alpha.2",
+    "@types/node": "^24.19.1",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "build": "tsc",
+    "pretest": "tsc",
+    "test": "node --test \"test/*.spec.mjs\"",
+    "prepublishOnly": "tsc",
+    "test:inject": "node scripts/inject-defects.mjs",
+    "probe:lines": "node scripts/probe-lines.mjs",
+    "witness:cancel-cause": "node scripts/witness-cancel-cause.mjs"
+  },
+  "engines": {
+    "node": "^22.19 || >=24"
+  }
+}
